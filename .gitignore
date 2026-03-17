@@ -1,0 +1,15 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Build artefacts (ZIP is committed only at release time via GitHub Actions)
+*.zip
+
+# Composer (plugin has no dependencies)
+vendor/
+composer.lock
