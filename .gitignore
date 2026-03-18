@@ -13,3 +13,7 @@ Thumbs.db
 # Composer (plugin has no dependencies)
 vendor/
 composer.lock
+
+# Release automation (contains secrets)
+create-release.ps1
+release-output.txt
