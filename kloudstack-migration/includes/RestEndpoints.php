@@ -80,6 +80,12 @@ class KloudStack_Migration_RestEndpoints {
             'callback'            => [ __CLASS__, 'media_files' ],
             'permission_callback' => [ __CLASS__, 'verify_token' ],
         ] );
+
+        register_rest_route( $ns, '/cancel-jobs', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ __CLASS__, 'cancel_jobs' ],
+            'permission_callback' => [ __CLASS__, 'verify_token' ],
+        ] );
     }
 
     // ------------------------------------------------------------------
@@ -196,6 +202,12 @@ class KloudStack_Migration_RestEndpoints {
         // Multisite check
         $is_multisite = is_multisite();
 
+        // WP-Cron health
+        $wp_cron_enabled   = ! ( defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON );
+        $cron_next_time    = wp_next_scheduled( KloudStack_Migration_BackgroundExport::CRON_HOOK );
+        $export_queue      = get_option( KloudStack_Migration_BackgroundExport::QUEUE_OPTION, [] );
+        $jobs_in_queue     = count( $export_queue );
+
         return new WP_REST_Response( [
             'site_url'      => get_site_url(),
             'home_url'      => get_home_url(),
@@ -215,6 +227,9 @@ class KloudStack_Migration_RestEndpoints {
             'uploads_size_mb' => $uploads_size,
             'is_multisite'  => $is_multisite,
             'table_prefix'  => $wpdb->prefix,
+            'wp_cron_enabled'      => $wp_cron_enabled,
+            'cron_next_scheduled'  => $cron_next_time ? (int) $cron_next_time : null,
+            'jobs_in_queue'        => $jobs_in_queue,
         ], 200 );
     }
 
@@ -271,6 +286,14 @@ class KloudStack_Migration_RestEndpoints {
 
         // Enqueue into BackgroundExport queue
         KloudStack_Migration_BackgroundExport::enqueue( $job_id, 'db_export', $sas_url );
+
+        // Kick WP-Cron immediately so the job starts processing without waiting
+        // for the next organic page visit to the source site.
+        wp_remote_get( site_url( '/?doing_wp_cron' ), [
+            'blocking'  => false,
+            'timeout'   => 0.01,
+            'sslverify' => false,
+        ] );
 
         return new WP_REST_Response( [ 'job_id' => $job_id ], 202 );
     }
@@ -330,6 +353,13 @@ class KloudStack_Migration_RestEndpoints {
         // Enqueue into BackgroundExport queue
         KloudStack_Migration_BackgroundExport::enqueue( $job_id, 'media_upload', $sas_url );
 
+        // Kick WP-Cron immediately — same reason as export_db above.
+        wp_remote_get( site_url( '/?doing_wp_cron' ), [
+            'blocking'  => false,
+            'timeout'   => 0.01,
+            'sslverify' => false,
+        ] );
+
         return new WP_REST_Response( [ 'job_id' => $job_id ], 202 );
     }
 
@@ -375,6 +405,63 @@ class KloudStack_Migration_RestEndpoints {
             'page'       => $page,
             'per_page'   => $per_page,
             'has_more'   => ( $offset + $per_page ) < $total,
+        ], 200 );
+    }
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    /**
+     * Cancel all queued/in-flight export jobs.
+     *
+     * Called by the KloudStack backend when a migration fails or is cancelled
+     * so that the export queue is cleared and orphaned jobs do not keep running.
+     *
+     * Accepts an optional JSON body: { "job_ids": ["db_xxx", "media_xxx"] }
+     * When job_ids is provided only those specific transients are cancelled;
+     * when omitted the entire queue is flushed.
+     *
+     * @param WP_REST_Request $request
+     * @return WP_REST_Response
+     */
+    public static function cancel_jobs( WP_REST_Request $request ): WP_REST_Response {
+        $params      = $request->get_json_params() ?? [];
+        $target_ids  = isset( $params['job_ids'] ) && is_array( $params['job_ids'] )
+            ? array_map( 'sanitize_key', $params['job_ids'] )
+            : [];
+
+        $queue    = get_option( KloudStack_Migration_BackgroundExport::QUEUE_OPTION, [] );
+        $removed  = [];
+        $kept     = [];
+
+        foreach ( $queue as $item ) {
+            $job_id = $item['job_id'] ?? '';
+            $should_remove = empty( $target_ids ) || in_array( $job_id, $target_ids, true );
+
+            if ( $should_remove ) {
+                // Mark the transient as cancelled so job-status polling gets a
+                // definitive answer rather than returning 'queued' indefinitely.
+                $existing = get_transient( self::JOB_TRANSIENT_PREFIX . $job_id );
+                if ( false !== $existing ) {
+                    set_transient(
+                        self::JOB_TRANSIENT_PREFIX . $job_id,
+                        array_merge( $existing, [ 'status' => 'cancelled', 'error' => 'Cancelled by KloudStack platform.' ] ),
+                        self::JOB_TTL
+                    );
+                }
+                $removed[] = $job_id;
+            } else {
+                $kept[] = $item;
+            }
+        }
+
+        // Persist the pruned queue.
+        update_option( KloudStack_Migration_BackgroundExport::QUEUE_OPTION, $kept, false );
+
+        return new WP_REST_Response( [
+            'cancelled' => $removed,
+            'remaining' => count( $kept ),
         ], 200 );
     }
 
