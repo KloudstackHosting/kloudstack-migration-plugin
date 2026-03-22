@@ -2,12 +2,10 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
-## [Unreleased]
+## [1.2.1] - 2026-03-22
 
-### Planned
-- **Auto-update notifications**: Bundle Plugin Update Checker library so WordPress admin
-  shows "Update available" badge when a new GitHub Release is published. Admins will be
-  able to click "Update Now" without manually re-installing the ZIP.
+### Fixed
+- `KLOUDSTACK_MIGRATION_VERSION` constant corrected to match plugin header version (was `1.0.0`, now `1.2.1`)
 
 ## [1.2.0] - 2026-03-22
 

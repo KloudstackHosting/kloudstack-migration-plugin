@@ -42,6 +42,10 @@ All communication is authenticated via your one-time plugin token. The plugin do
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
+## Planned
+
+- **Auto-update notifications**: Bundle Plugin Update Checker library so WordPress admin shows "Update available" badge when a new GitHub Release is published. Admins will be able to click "Update Now" without manually re-installing the ZIP.
+
 ## Support
 
 Contact [support@kloudstack.com.au](mailto:support@kloudstack.com.au) or open an issue in this repository.
