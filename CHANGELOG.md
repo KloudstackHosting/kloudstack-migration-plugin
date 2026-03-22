@@ -2,6 +2,16 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
+## [1.2.3] - 2026-03-25
+
+### Fixed
+- DB export job stuck at 0% on Azure App Service: replaced unreliable loopback
+  `wp_remote_get( '/?doing_wp_cron' )` (0.01 s timeout — too short for an Azure Front
+  Door round-trip) with a `register_shutdown_function` + `fastcgi_finish_request()`
+  approach. `process_queue()` now runs directly in the same PHP-FPM worker immediately
+  after the 202 response is flushed, with no WP-Cron or loopback HTTP dependency.
+  WP-Cron scheduling is retained as a belt-and-suspenders fallback.
+
 ## [1.2.2] - 2026-03-22
 
 ### Added

@@ -287,13 +287,30 @@ class KloudStack_Migration_RestEndpoints {
         // Enqueue into BackgroundExport queue
         KloudStack_Migration_BackgroundExport::enqueue( $job_id, 'db_export', $sas_url );
 
-        // Kick WP-Cron immediately so the job starts processing without waiting
-        // for the next organic page visit to the source site.
-        wp_remote_get( site_url( '/?doing_wp_cron' ), [
-            'blocking'  => false,
-            'timeout'   => 0.01,
-            'sslverify' => false,
-        ] );
+        // Process the queue immediately after this response is sent.
+        //
+        // A loopback wp_remote_get to /?doing_wp_cron is unreliable on Azure App Service
+        // (the 0.01 s timeout is shorter than a Front Door round-trip, and loopback
+        // requests are often blocked by the platform).  Instead we register a PHP
+        // shutdown function so process_queue() runs in the same PHP-FPM worker after
+        // the 202 has been flushed to the caller — no WP-Cron required.
+        //
+        // fastcgi_finish_request() closes the client connection first so Django's
+        // httpx call completes immediately; PHP continues running in the background.
+        register_shutdown_function( function () {
+            if ( function_exists( 'fastcgi_finish_request' ) ) {
+                fastcgi_finish_request(); // Flush + close client connection
+            }
+            ignore_user_abort( true );
+            set_time_limit( 300 ); // Allow up to 5 min for large DBs
+            KloudStack_Migration_BackgroundExport::process_queue();
+        } );
+
+        // Also schedule via WP-Cron as a belt-and-suspenders fallback
+        // (fires on the next page load if the shutdown function was cut short).
+        if ( ! wp_next_scheduled( KloudStack_Migration_BackgroundExport::CRON_HOOK ) ) {
+            wp_schedule_single_event( time(), KloudStack_Migration_BackgroundExport::CRON_HOOK );
+        }
 
         return new WP_REST_Response( [ 'job_id' => $job_id ], 202 );
     }
