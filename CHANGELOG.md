@@ -2,6 +2,15 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
+## [1.2.0] - 2026-03-22
+
+### Added
+- `POST /cancel-jobs` REST endpoint: clears the export queue and marks pending job
+  transients as `cancelled`. Accepts an optional `{ "job_ids": [...] }` body to cancel
+  specific jobs; when omitted, flushes the entire queue.
+- KloudStack backend now calls `/cancel-jobs` best-effort whenever a migration fails or
+  is paused, so orphaned export jobs are not left running on the source site.
+
 ## [1.1.0] - 2026-03-21
 
 ### Fixed

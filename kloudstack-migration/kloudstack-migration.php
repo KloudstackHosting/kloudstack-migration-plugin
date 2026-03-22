@@ -4,7 +4,7 @@
  * Plugin URI:  https://kloudstack.com.au
  * Description: Enables secure WordPress site migration to the KloudStack PaaS Platform.
  *              Provides REST API endpoints for database export, media upload, and site validation.
- * Version:     1.1.0
+ * Version:     1.2.0
  * Author:      KloudStack
  * Author URI:  https://kloudstack.com.au
  * License:     Proprietary
