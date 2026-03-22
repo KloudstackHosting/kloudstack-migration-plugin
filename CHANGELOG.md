@@ -2,6 +2,28 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
+## [1.2.5] - 2026-03-22
+
+### Fixed
+- **Concurrency lock**: `process_queue()` now acquires a 10-minute transient mutex
+  before processing. Prevents double-execution when the shutdown function and
+  WP-Cron both fire simultaneously, which previously doubled CPU/memory usage.
+- **Memory — streaming upload**: `_upload_file_to_blob()` now uses cURL streaming
+  PUT instead of `wp_remote_request()` with `file_get_contents()`. The old approach
+  loaded the entire file into PHP memory, causing OOM crashes on Azure App Service
+  (default 128 MB limit) with large databases or media archives.
+- **CPU — gzip level**: Changed `gzip -9` (max compression) to `gzip -4` in the
+  mysqldump pipeline. `-9` caused CPU spikes on Azure App Service Consumption plans;
+  `-4` gives a good compression ratio with significantly lower CPU cost.
+- **ZIP progress reporting**: Removed incorrect `ZipArchive::close()` + `open()`
+  flush loop (files added after the first 500 could be silently skipped). Progress
+  is now updated every 100 files without closing/reopening the archive.
+- **exec() guard**: `_run_db_export()` now checks `exec()` availability at the start
+  and throws a clear error if it is disabled, rather than silently producing an empty
+  dump file.
+- **Time limits**: Both shutdown functions now allow 600 s (10 min) instead of 300 s
+  to accommodate large sites on slower Azure App Service tiers.
+
 ## [1.2.4] - 2026-03-22
 
 ### Fixed

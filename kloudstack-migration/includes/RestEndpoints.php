@@ -302,7 +302,7 @@ class KloudStack_Migration_RestEndpoints {
                 fastcgi_finish_request(); // Flush + close client connection
             }
             ignore_user_abort( true );
-            set_time_limit( 300 ); // Allow up to 5 min for large DBs
+            set_time_limit( 600 ); // Allow up to 10 min (large DB dump + upload combined)
             KloudStack_Migration_BackgroundExport::process_queue();
         } );
 
@@ -377,7 +377,7 @@ class KloudStack_Migration_RestEndpoints {
                 fastcgi_finish_request();
             }
             ignore_user_abort( true );
-            set_time_limit( 300 );
+            set_time_limit( 600 ); // Allow up to 10 min for large media archives
             KloudStack_Migration_BackgroundExport::process_queue();
         } );
 

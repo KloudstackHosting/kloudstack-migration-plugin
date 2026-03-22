@@ -91,52 +91,66 @@ class KloudStack_Migration_BackgroundExport {
      * Called by WP-Cron every minute.
      */
     public static function process_queue(): void {
-        $queue = get_option( self::QUEUE_OPTION, [] );
-        if ( empty( $queue ) ) {
-            return;
+        // Prevent concurrent execution. The shutdown function registered by export_db /
+        // upload_media and WP-Cron can both fire process_queue() at the same time.
+        // A transient-based mutex stops double-processing and double resource usage.
+        $lock_key = 'ks_mig_queue_lock';
+        if ( get_transient( $lock_key ) ) {
+            return; // Another invocation is already running — skip silently
         }
+        // TTL = 10 min. Auto-expires if the process is killed before the finally block.
+        set_transient( $lock_key, 1, 600 );
 
-        $processed = 0;
-        $remaining = [];
-
-        foreach ( $queue as $item ) {
-            if ( $processed >= self::MAX_JOBS_PER_RUN ) {
-                $remaining[] = $item;
-                continue;
+        try {
+            $queue = get_option( self::QUEUE_OPTION, [] );
+            if ( empty( $queue ) ) {
+                return;
             }
 
-            $job_id  = $item['job_id'];
-            $type    = $item['type'];
-            $sas_url = $item['sas_url'];
+            $processed = 0;
+            $remaining = [];
 
-            // Mark as processing
-            self::_update_job( $job_id, [ 'status' => 'processing', 'progress' => 5 ] );
-
-            $success = false;
-            try {
-                if ( 'db_export' === $type ) {
-                    $success = self::_run_db_export( $job_id, $sas_url );
-                } elseif ( 'media_upload' === $type ) {
-                    $success = self::_run_media_upload( $job_id, $sas_url );
+            foreach ( $queue as $item ) {
+                if ( $processed >= self::MAX_JOBS_PER_RUN ) {
+                    $remaining[] = $item;
+                    continue;
                 }
-            } catch ( Exception $e ) {
-                self::_update_job( $job_id, [
-                    'status' => 'failed',
-                    'error'  => substr( $e->getMessage(), 0, 500 ),
-                ] );
-                error_log( "KloudStack Migration: job {$job_id} failed: " . $e->getMessage() );
+
+                $job_id  = $item['job_id'];
+                $type    = $item['type'];
+                $sas_url = $item['sas_url'];
+
+                // Mark as processing
+                self::_update_job( $job_id, [ 'status' => 'processing', 'progress' => 5 ] );
+
+                $success = false;
+                try {
+                    if ( 'db_export' === $type ) {
+                        $success = self::_run_db_export( $job_id, $sas_url );
+                    } elseif ( 'media_upload' === $type ) {
+                        $success = self::_run_media_upload( $job_id, $sas_url );
+                    }
+                } catch ( Exception $e ) {
+                    self::_update_job( $job_id, [
+                        'status' => 'failed',
+                        'error'  => substr( $e->getMessage(), 0, 500 ),
+                    ] );
+                    error_log( "KloudStack Migration: job {$job_id} failed: " . $e->getMessage() );
+                }
+
+                if ( $success ) {
+                    self::_update_job( $job_id, [ 'status' => 'complete', 'progress' => 100 ] );
+                } elseif ( 'failed' !== self::_job_status( $job_id ) ) {
+                    $remaining[] = $item; // Re-queue if not explicitly marked failed
+                }
+
+                $processed++;
             }
 
-            if ( $success ) {
-                self::_update_job( $job_id, [ 'status' => 'complete', 'progress' => 100 ] );
-            } elseif ( 'failed' !== self::_job_status( $job_id ) ) {
-                $remaining[] = $item; // Re-queue if not explicitly marked failed
-            }
-
-            $processed++;
+            update_option( self::QUEUE_OPTION, $remaining, false );
+        } finally {
+            delete_transient( $lock_key );
         }
-
-        update_option( self::QUEUE_OPTION, $remaining, false );
     }
 
     // ------------------------------------------------------------------
@@ -157,6 +171,12 @@ class KloudStack_Migration_BackgroundExport {
     private static function _run_db_export( string $job_id, string $sas_url ): bool {
         self::_validate_sas_url( $sas_url );
 
+        // exec() is required for mysqldump. Available by default on Azure App Service
+        // Linux, but may be disabled on some shared hosting environments.
+        if ( ! function_exists( 'exec' ) ) {
+            throw new Exception( 'Database export requires exec() which is not available on this server. Contact your hosting provider.' );
+        }
+
         $tmp_file = tempnam( sys_get_temp_dir(), 'ks_db_' ) . '.sql.gz';
 
         try {
@@ -169,9 +189,11 @@ class KloudStack_Migration_BackgroundExport {
             // DB_PASSWORD is passed via env var to avoid appearing on process list
             putenv( 'MYSQL_PWD=' . DB_PASSWORD );
 
+            // gzip -4 balances compression vs CPU cost.
+            // gzip -9 (max) spikes CPU heavily on Azure App Service Consumption plans.
             $cmd = "mysqldump --host={$host} --user={$user} --single-transaction "
                  . "--routines --triggers --add-drop-table {$database} "
-                 . "| gzip -9 > {$tmp_esc} 2>&1";
+                 . "| gzip -4 > {$tmp_esc} 2>&1";
 
             $output    = [];
             $exit_code = 0;
@@ -251,12 +273,12 @@ class KloudStack_Migration_BackgroundExport {
                     $zip->addFile( $file->getPathname(), $relative_path );
                     $file_count++;
 
-                    // Flush every 500 files to manage memory
-                    if ( 0 === $file_count % 500 ) {
-                        $zip->close();
-                        $zip->open( $tmp_zip );
-                        // Update progress (estimate: zip phase = 0-60%)
-                        self::_update_job( $job_id, [ 'progress' => min( 60, (int) ( $file_count / 100 ) ) ] );
+                    // Update progress periodically during the zip phase (5–55%).
+                    // ZipArchive::addFile() only stores the path reference — actual
+                    // file data is compressed at close() time, so no memory flush
+                    // is needed here.
+                    if ( 0 === $file_count % 100 ) {
+                        self::_update_job( $job_id, [ 'progress' => min( 55, 5 + (int) ( $file_count / 20 ) ) ] );
                     }
                 }
             }
@@ -298,26 +320,45 @@ class KloudStack_Migration_BackgroundExport {
      */
     private static function _upload_file_to_blob( string $sas_url, string $local_path, string $mime_type ): void {
         $file_size = filesize( $local_path );
+        $fh        = fopen( $local_path, 'rb' );
 
-        $response = wp_remote_request( $sas_url, [
-            'method'  => 'PUT',
-            'timeout' => 3600,  // 1 hour for very large sites
-            'headers' => [
-                'Content-Type'   => $mime_type,
-                'Content-Length' => $file_size,
-                'x-ms-blob-type' => 'BlockBlob',
-            ],
-            'body'    => file_get_contents( $local_path ),  // WP HTTP API handles body
-        ] );
-
-        if ( is_wp_error( $response ) ) {
-            throw new Exception( 'HTTP upload error: ' . $response->get_error_message() );
+        if ( false === $fh ) {
+            throw new Exception( "Cannot open file for upload: {$local_path}" );
         }
 
-        $http_code = wp_remote_retrieve_response_code( $response );
-        if ( $http_code < 200 || $http_code >= 300 ) {
-            $body = wp_remote_retrieve_body( $response );
-            throw new Exception( "Azure Blob upload failed (HTTP {$http_code}): " . substr( $body, 0, 300 ) );
+        try {
+            // Use cURL streaming PUT to avoid loading the entire file into memory.
+            // wp_remote_request() passes the body as a string (file_get_contents)
+            // which OOMs on large DB dumps / media ZIPs on Azure App Service
+            // (default memory_limit is 128 MB).
+            $ch = curl_init( $sas_url );
+            curl_setopt_array( $ch, [
+                CURLOPT_PUT            => true,
+                CURLOPT_INFILE         => $fh,
+                CURLOPT_INFILESIZE     => $file_size,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT        => 3600,
+                CURLOPT_HTTPHEADER     => [
+                    'Content-Type: ' . $mime_type,
+                    'x-ms-blob-type: BlockBlob',
+                    'Expect:',  // Suppress 100-Continue handshake delay with Azure
+                ],
+            ] );
+
+            $body      = curl_exec( $ch );
+            $http_code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+            $curl_err  = curl_error( $ch );
+            curl_close( $ch );
+
+            if ( $curl_err ) {
+                throw new Exception( 'cURL upload error: ' . $curl_err );
+            }
+
+            if ( $http_code < 200 || $http_code >= 300 ) {
+                throw new Exception( "Azure Blob upload failed (HTTP {$http_code}): " . substr( (string) $body, 0, 300 ) );
+            }
+        } finally {
+            fclose( $fh );
         }
     }
 
