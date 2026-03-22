@@ -4,7 +4,7 @@
  * Plugin URI:  https://kloudstack.com.au
  * Description: Enables secure WordPress site migration to the KloudStack PaaS Platform.
  *              Provides REST API endpoints for database export, media upload, and site validation.
- * Version:     1.2.1
+ * Version:     1.2.2
  * Author:      KloudStack
  * Author URI:  https://kloudstack.com.au
  * License:     Proprietary
@@ -19,9 +19,25 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit; // WordPress required — never load directly.
 }
 
-define( 'KLOUDSTACK_MIGRATION_VERSION', '1.2.1' );
+define( 'KLOUDSTACK_MIGRATION_VERSION', '1.2.2' );
 define( 'KLOUDSTACK_MIGRATION_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KLOUDSTACK_MIGRATION_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
+
+// -------------------------------------------------------------------------
+// Wrong-folder detection — fires before anything else loads
+// -------------------------------------------------------------------------
+
+add_action( 'admin_notices', function () {
+    $expected = 'kloudstack-migration/kloudstack-migration.php';
+    if ( plugin_basename( __FILE__ ) !== $expected ) {
+        $actual = esc_html( plugin_basename( __FILE__ ) );
+        echo '<div class="notice notice-error"><p>'
+            . '<strong>KloudStack Migration:</strong> Plugin installed to wrong folder '
+            . '(<code>' . $actual . '</code>). '
+            . 'Please <strong>deactivate and delete</strong> this copy, then reinstall the ZIP fresh.'
+            . '</p></div>';
+    }
+} );
 
 // -------------------------------------------------------------------------
 // Autoload includes

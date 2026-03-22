@@ -2,6 +2,12 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
+## [1.2.2] - 2026-03-22
+
+### Added
+- Admin notice if plugin is installed to a wrong-named folder (e.g. `kloudstack-migration-3/`).
+  Clearly instructs the user to deactivate, delete, and reinstall the ZIP clean.
+
 ## [1.2.1] - 2026-03-22
 
 ### Fixed
