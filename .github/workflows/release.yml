@@ -1,0 +1,53 @@
+name: Release Plugin ZIP
+
+on:
+  push:
+    tags:
+      - 'v*'        # triggers on v1.2.0, v1.3.0, etc.
+
+permissions:
+  contents: write   # needed to create releases and upload assets
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Read the version directly from the plugin PHP header so the tag
+      # and the plugin file are always kept in sync.
+      - name: Read plugin version
+        id: version
+        run: |
+          VERSION=$(grep -oP '(?<=\* Version:\s{5})\S+' kloudstack-migration/kloudstack-migration.php)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Plugin version: $VERSION"
+
+      # Compress the plugin folder so WordPress can unzip it as
+      # wp-content/plugins/kloudstack-migration/
+      - name: Build ZIP
+        run: |
+          zip -r kloudstack-migration.zip kloudstack-migration/
+          echo "ZIP size: $(du -sh kloudstack-migration.zip | cut -f1)"
+
+      # Read the CHANGELOG entry for this version to use as release notes.
+      - name: Extract changelog entry
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Extract text between this version heading and the next
+          NOTES=$(awk "/^## \[$VERSION\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md)
+          # Write to a file to avoid multiline env var issues
+          echo "$NOTES" > release_notes.txt
+          cat release_notes.txt
+
+      - name: Create GitHub Release and upload ZIP
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: KloudStack Migration Plugin ${{ github.ref_name }}
+          body_path: release_notes.txt
+          files: kloudstack-migration.zip
+          fail_on_unmatched_files: true
