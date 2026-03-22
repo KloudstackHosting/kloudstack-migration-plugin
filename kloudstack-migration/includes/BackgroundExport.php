@@ -120,15 +120,23 @@ class KloudStack_Migration_BackgroundExport {
                 $type    = $item['type'];
                 $sas_url = $item['sas_url'];
 
+                // Load agent-provided hints stored when the job was queued.
+                // On retries after a failure the backend may include adjusted parameters
+                // (e.g. lower gzip_level after a CPU timeout or skip_extensions after an OOM).
+                $job_transient = get_transient( KloudStack_Migration_RestEndpoints::JOB_TRANSIENT_PREFIX . $job_id );
+                $hints = ( is_array( $job_transient ) && isset( $job_transient['hints'] ) && is_array( $job_transient['hints'] ) )
+                    ? $job_transient['hints']
+                    : [];
+
                 // Mark as processing
                 self::_update_job( $job_id, [ 'status' => 'processing', 'progress' => 5 ] );
 
                 $success = false;
                 try {
                     if ( 'db_export' === $type ) {
-                        $success = self::_run_db_export( $job_id, $sas_url );
+                        $success = self::_run_db_export( $job_id, $sas_url, $hints );
                     } elseif ( 'media_upload' === $type ) {
-                        $success = self::_run_media_upload( $job_id, $sas_url );
+                        $success = self::_run_media_upload( $job_id, $sas_url, $hints );
                     }
                 } catch ( Exception $e ) {
                     self::_update_job( $job_id, [
@@ -168,7 +176,7 @@ class KloudStack_Migration_BackgroundExport {
      * @return bool  true on success
      * @throws Exception  on mysqldump failure or upload failure
      */
-    private static function _run_db_export( string $job_id, string $sas_url ): bool {
+    private static function _run_db_export( string $job_id, string $sas_url, array $hints = [] ): bool {
         self::_validate_sas_url( $sas_url );
 
         // exec() is required for mysqldump. Available by default on Azure App Service
@@ -176,6 +184,10 @@ class KloudStack_Migration_BackgroundExport {
         if ( ! function_exists( 'exec' ) ) {
             throw new Exception( 'Database export requires exec() which is not available on this server. Contact your hosting provider.' );
         }
+
+        // Apply agent hint for compression level. Default is 4 (balanced CPU/size).
+        // On retry after a CPU timeout the agent may set this to 1 (fastest, larger file).
+        $gzip_level = isset( $hints['gzip_level'] ) ? max( 1, min( 9, (int) $hints['gzip_level'] ) ) : 4;
 
         $tmp_file = tempnam( sys_get_temp_dir(), 'ks_db_' ) . '.sql.gz';
 
@@ -193,7 +205,7 @@ class KloudStack_Migration_BackgroundExport {
             // gzip -9 (max) spikes CPU heavily on Azure App Service Consumption plans.
             $cmd = "mysqldump --host={$host} --user={$user} --single-transaction "
                  . "--routines --triggers --add-drop-table {$database} "
-                 . "| gzip -4 > {$tmp_esc} 2>&1";
+                 . "| gzip -{$gzip_level} > {$tmp_esc} 2>&1";
 
             $output    = [];
             $exit_code = 0;
@@ -239,7 +251,7 @@ class KloudStack_Migration_BackgroundExport {
      * @return bool
      * @throws Exception
      */
-    private static function _run_media_upload( string $job_id, string $sas_url ): bool {
+    private static function _run_media_upload( string $job_id, string $sas_url, array $hints = [] ): bool {
         self::_validate_sas_url( $sas_url );
 
         if ( ! class_exists( 'ZipArchive' ) ) {
@@ -252,6 +264,15 @@ class KloudStack_Migration_BackgroundExport {
         if ( ! is_dir( $base_dir ) ) {
             throw new Exception( "Uploads directory not found: {$base_dir}" );
         }
+
+        // Agent hints: skip files by extension or size on retry attempts.
+        // These are applied when a previous attempt timed out due to large video/archive files.
+        $skip_extensions   = isset( $hints['skip_extensions'] ) && is_array( $hints['skip_extensions'] )
+            ? array_map( 'strtolower', $hints['skip_extensions'] )
+            : [];
+        $max_size_bytes = isset( $hints['max_file_size_mb'] ) && $hints['max_file_size_mb'] > 0
+            ? ( (int) $hints['max_file_size_mb'] ) * 1024 * 1024
+            : 0;  // 0 = no limit
 
         $tmp_zip = tempnam( sys_get_temp_dir(), 'ks_media_' ) . '.zip';
 
@@ -269,6 +290,17 @@ class KloudStack_Migration_BackgroundExport {
             $file_count = 0;
             foreach ( $iterator as $file ) {
                 if ( $file->isFile() ) {
+                    // Apply agent hints: skip by extension and/or file size.
+                    if ( $skip_extensions ) {
+                        $ext = strtolower( pathinfo( $file->getFilename(), PATHINFO_EXTENSION ) );
+                        if ( in_array( '.' . $ext, $skip_extensions, true ) || in_array( $ext, $skip_extensions, true ) ) {
+                            continue;
+                        }
+                    }
+                    if ( $max_size_bytes > 0 && $file->getSize() > $max_size_bytes ) {
+                        continue;
+                    }
+
                     $relative_path = str_replace( $base_dir . DIRECTORY_SEPARATOR, '', $file->getPathname() );
                     $zip->addFile( $file->getPathname(), $relative_path );
                     $file_count++;

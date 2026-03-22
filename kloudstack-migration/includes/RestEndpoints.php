@@ -230,6 +230,13 @@ class KloudStack_Migration_RestEndpoints {
             'wp_cron_enabled'      => $wp_cron_enabled,
             'cron_next_scheduled'  => $cron_next_time ? (int) $cron_next_time : null,
             'jobs_in_queue'        => $jobs_in_queue,
+            // Hosting environment — detected server-side so the migration agent has
+            // accurate context without guessing from URLs.
+            'hosting_platform'       => self::_detect_hosting_platform(),
+            'exec_available'         => ( function_exists( 'exec' ) && ! in_array( 'exec', array_map( 'trim', explode( ',', ini_get( 'disable_functions' ) ) ), true ) ),
+            'php_memory_limit_mb'    => self::_php_memory_limit_mb(),
+            'php_max_execution_time' => (int) ini_get( 'max_execution_time' ),
+            'disk_free_mb'           => ( disk_free_space( ABSPATH ) !== false ) ? round( disk_free_space( ABSPATH ) / 1024 / 1024, 1 ) : null,
         ], 200 );
     }
 
@@ -268,7 +275,12 @@ class KloudStack_Migration_RestEndpoints {
      * @return WP_REST_Response
      */
     public static function export_db( WP_REST_Request $request ): WP_REST_Response {
-        $sas_url = sanitize_url( $request->get_json_params()['sas_url'] ?? '' );
+        $params  = $request->get_json_params();
+        $sas_url = sanitize_url( $params['sas_url'] ?? '' );
+
+        // Agent-provided hints for this attempt (e.g. reduced gzip_level after a CPU timeout).
+        // Stored in the job transient so BackgroundExport can apply them when it runs.
+        $hints = self::_sanitize_hints( $params['hints'] ?? [] );
 
         $job_id = 'db_' . wp_generate_uuid4();
 
@@ -277,6 +289,7 @@ class KloudStack_Migration_RestEndpoints {
             'status'     => 'queued',
             'progress'   => 0,
             'sas_url'    => $sas_url,
+            'hints'      => $hints,
             'created_at' => time(),
             'blob_path'  => '',
             'error'      => null,
@@ -354,6 +367,9 @@ class KloudStack_Migration_RestEndpoints {
         $params  = $request->get_json_params();
         $sas_url = sanitize_url( $params['sas_url'] ?? '' );
 
+        // Agent-provided hints (e.g. skip large video files that caused timeouts).
+        $hints = self::_sanitize_hints( $params['hints'] ?? [] );
+
         $job_id = 'media_' . wp_generate_uuid4();
 
         $job = [
@@ -361,6 +377,7 @@ class KloudStack_Migration_RestEndpoints {
             'status'     => 'queued',
             'progress'   => 0,
             'sas_url'    => $sas_url,
+            'hints'      => $hints,
             'created_at' => time(),
             'error'      => null,
         ];
@@ -512,5 +529,73 @@ class KloudStack_Migration_RestEndpoints {
             }
         }
         return round( $size / 1024 / 1024, 2 );
+    }
+
+    /**
+     * Detect the hosting platform from server-side environment variables.
+     * More reliable than URL heuristics; used by the migration agent for
+     * context-aware risk assessment and export strategy.
+     */
+    private static function _detect_hosting_platform(): string {
+        // Azure App Service sets WEBSITE_SITE_NAME on all Linux/Windows plans
+        if ( getenv( 'WEBSITE_SITE_NAME' ) !== false ) {
+            return 'azure_app_service';
+        }
+        if ( defined( 'WPE_APIKEY' ) ) {
+            return 'wpe';
+        }
+        if ( defined( 'WPCOM_IS_VIP_ENV' ) && WPCOM_IS_VIP_ENV ) {
+            return 'wpvip';
+        }
+        if ( getenv( 'KINSTA_CACHE_ZONE' ) !== false ) {
+            return 'kinsta';
+        }
+        return 'other';
+    }
+
+    /**
+     * Return PHP memory_limit in MB. Returns -1 for unlimited.
+     */
+    private static function _php_memory_limit_mb(): int {
+        $val = ini_get( 'memory_limit' );
+        if ( '-1' === $val ) {
+            return -1;
+        }
+        return (int) ( wp_convert_hr_to_bytes( $val ) / 1024 / 1024 );
+    }
+
+    /**
+     * Sanitise agent-provided hints from the request body.
+     * Only allows known, typed keys — all values are validated and clamped.
+     *
+     * @param mixed $raw  Untrusted input from request body
+     * @return array      Safe hints array
+     */
+    private static function _sanitize_hints( $raw ): array {
+        if ( ! is_array( $raw ) || empty( $raw ) ) {
+            return [];
+        }
+        $hints = [];
+
+        // gzip compression level — lower = less CPU, larger file
+        if ( isset( $raw['gzip_level'] ) ) {
+            $hints['gzip_level'] = max( 1, min( 9, (int) $raw['gzip_level'] ) );
+        }
+
+        // File extensions to skip during media ZIP (e.g. large video files)
+        if ( isset( $raw['skip_extensions'] ) && is_array( $raw['skip_extensions'] ) ) {
+            $hints['skip_extensions'] = array_values(
+                array_filter(
+                    array_map( 'sanitize_text_field', array_slice( $raw['skip_extensions'], 0, 20 ) )
+                )
+            );
+        }
+
+        // Maximum individual file size to include in media ZIP (0 = no limit)
+        if ( isset( $raw['max_file_size_mb'] ) ) {
+            $hints['max_file_size_mb'] = max( 0, (int) $raw['max_file_size_mb'] );
+        }
+
+        return $hints;
     }
 }

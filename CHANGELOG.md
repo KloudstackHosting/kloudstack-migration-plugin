@@ -2,6 +2,25 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
+## [1.2.6] - 2026-03-22
+
+### Added
+- **Server-side hosting detection** (`/discover`): New fields `hosting_platform`,
+  `exec_available`, `php_memory_limit_mb`, `php_max_execution_time`, and `disk_free_mb`
+  added to the `/discover` response. `hosting_platform` is detected via environment
+  variables and constants (`azure_app_service`, `wpe`, `wpvip`, `kinsta`, `other`),
+  giving the migration agent reliable server-side truth rather than URL heuristics.
+- **Agent hints channel**: `export_db` and `upload_media` endpoints now accept an
+  optional `hints` JSON object in the request body. The hints are sanitised and stored
+  in the job transient so `BackgroundExport` can apply them during processing.
+- **Adaptive gzip compression**: `BackgroundExport::_run_db_export()` reads
+  `gzip_level` from agent hints (default `4`). On a retry after a CPU timeout the
+  agent can send `gzip_level: 1` to trade file size for significantly lower CPU cost.
+- **Selective media export**: `BackgroundExport::_run_media_upload()` reads
+  `skip_extensions` (array, e.g. `[".mp4",".mkv"]`) and `max_file_size_mb` (int)
+  from agent hints. Files matching either filter are skipped and counted; the total
+  is logged and stored in the job record so the agent can report on skipped content.
+
 ## [1.2.5] - 2026-03-22
 
 ### Fixed
