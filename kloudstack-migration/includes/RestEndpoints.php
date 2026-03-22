@@ -86,6 +86,12 @@ class KloudStack_Migration_RestEndpoints {
             'callback'            => [ __CLASS__, 'cancel_jobs' ],
             'permission_callback' => [ __CLASS__, 'verify_token' ],
         ] );
+
+        register_rest_route( $ns, '/export-site-content', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ __CLASS__, 'export_site_content' ],
+            'permission_callback' => [ __CLASS__, 'verify_token' ],
+        ] );
     }
 
     // ------------------------------------------------------------------
@@ -403,6 +409,121 @@ class KloudStack_Migration_RestEndpoints {
         }
 
         return new WP_REST_Response( [ 'job_id' => $job_id ], 202 );
+    }
+
+    // ------------------------------------------------------------------
+    // Endpoint: POST /export-site-content
+    // ------------------------------------------------------------------
+
+    /**
+     * Start parallel async export jobs for each requested wp-content artifact.
+     *
+     * Request body:
+     *   {
+     *     "sas_urls": {
+     *       "plugins":     "https://...plugins.zip?sas",
+     *       "themes":      "https://...themes.zip?sas",
+     *       "media":       "https://...media.zip?sas",
+     *       "mu-plugins":  "https://...mu-plugins.zip?sas",  // optional
+     *       "custom-root": "https://...custom-root.zip?sas"  // optional
+     *     },
+     *     "hints": { ... }  // optional agent hints forwarded to each job
+     *   }
+     *
+     * Response (202):
+     *   {
+     *     "jobs": {
+     *       "plugins": "job_id_abc",
+     *       "themes":  "job_id_def",
+     *       "media":   "job_id_ghi"
+     *     }
+     *   }
+     *
+     * @param WP_REST_Request $request
+     * @return WP_REST_Response
+     */
+    public static function export_site_content( WP_REST_Request $request ): WP_REST_Response {
+        $params   = $request->get_json_params();
+        $sas_urls = $params['sas_urls'] ?? [];
+        $hints    = self::_sanitize_hints( $params['hints'] ?? [] );
+
+        if ( ! is_array( $sas_urls ) || empty( $sas_urls ) ) {
+            return new WP_REST_Response( [ 'error' => 'sas_urls is required and must be a non-empty object.' ], 400 );
+        }
+
+        // Resolve artifact name → absolute filesystem path.
+        // Only well-known artifact names are accepted to prevent path traversal.
+        $uploads_basedir = wp_upload_dir()['basedir'];
+        $artifact_paths  = [
+            'plugins'     => WP_CONTENT_DIR . '/plugins',
+            'themes'      => WP_CONTENT_DIR . '/themes',
+            'media'       => $uploads_basedir,
+            'mu-plugins'  => WP_CONTENT_DIR . '/mu-plugins',
+            'custom-root' => 'custom-root',  // sentinel — handled specially in BackgroundExport
+        ];
+
+        $jobs = [];
+
+        foreach ( $sas_urls as $artifact => $sas_url ) {
+            // Reject unknown artifact names
+            if ( ! array_key_exists( $artifact, $artifact_paths ) ) {
+                continue;
+            }
+
+            $source_path = $artifact_paths[ $artifact ];
+
+            // Skip artifacts whose directory doesn't exist (e.g. mu-plugins on a stock site)
+            if ( 'custom-root' !== $source_path && ! is_dir( $source_path ) ) {
+                continue;
+            }
+
+            $sas_url = sanitize_url( $sas_url );
+            $job_id  = 'content_' . sanitize_key( $artifact ) . '_' . wp_generate_uuid4();
+
+            $job = [
+                'type'        => 'content_export',
+                'status'      => 'queued',
+                'progress'    => 0,
+                'sas_url'     => $sas_url,
+                'source_path' => $source_path,
+                'artifact'    => $artifact,
+                'hints'       => $hints,
+                'created_at'  => time(),
+                'error'       => null,
+            ];
+
+            set_transient( self::JOB_TRANSIENT_PREFIX . $job_id, $job, self::JOB_TTL );
+
+            KloudStack_Migration_BackgroundExport::enqueue(
+                $job_id,
+                'content_export',
+                $sas_url,
+                [ 'source_path' => $source_path, 'artifact' => $artifact ]
+            );
+
+            $jobs[ $artifact ] = $job_id;
+        }
+
+        if ( empty( $jobs ) ) {
+            return new WP_REST_Response( [ 'error' => 'No valid artifact paths found for the requested sas_urls.' ], 422 );
+        }
+
+        // Flush the 202 response, then kick the queue in the same PHP-FPM worker.
+        // Loopback WP-Cron is unreliable on Azure App Service + Front Door.
+        register_shutdown_function( function () {
+            if ( function_exists( 'fastcgi_finish_request' ) ) {
+                fastcgi_finish_request();
+            }
+            ignore_user_abort( true );
+            set_time_limit( 600 );
+            KloudStack_Migration_BackgroundExport::process_queue();
+        } );
+
+        if ( ! wp_next_scheduled( KloudStack_Migration_BackgroundExport::CRON_HOOK ) ) {
+            wp_schedule_single_event( time(), KloudStack_Migration_BackgroundExport::CRON_HOOK );
+        }
+
+        return new WP_REST_Response( [ 'jobs' => $jobs ], 202 );
     }
 
     // ------------------------------------------------------------------

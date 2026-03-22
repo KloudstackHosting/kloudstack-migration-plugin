@@ -2,6 +2,23 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
+## [1.2.7] - 2026-07-14
+
+### Added
+- **`/export-site-content` endpoint**: New consolidated REST endpoint that accepts a
+  `sas_urls` map (keyed by artifact: `plugins`, `themes`, `media`, `mu-plugins`,
+  `custom-root`) plus optional `hints`, creates one background job per artifact, and
+  returns `{ "jobs": { "<artifact>": "<job_id>" } }` with HTTP 202. Replaces the need
+  to call `/upload-media` separately for each artifact type.
+- **`BackgroundExport::_run_content_export()`**: New handler that ZIPs a given source
+  directory (resolved from the artifact name) and uploads it to Azure Blob via SAS PUT.
+  Supports the same `skip_extensions` and `max_file_size_mb` agent hints as
+  `_run_media_upload()`. The special `'custom-root'` artifact exports only root-level
+  files in `WP_CONTENT_DIR`, excluding standard sub-directories.
+- **`BackgroundExport::enqueue()` extended**: Accepts an optional `$extra_data` array
+  merged into the queue item, enabling the new `content_export` job type to carry
+  `source_path` without breaking existing `db_export`/`media_upload` callers.
+
 ## [1.2.6] - 2026-03-22
 
 ### Added
