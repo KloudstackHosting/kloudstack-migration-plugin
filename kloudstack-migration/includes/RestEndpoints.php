@@ -370,12 +370,20 @@ class KloudStack_Migration_RestEndpoints {
         // Enqueue into BackgroundExport queue
         KloudStack_Migration_BackgroundExport::enqueue( $job_id, 'media_upload', $sas_url );
 
-        // Kick WP-Cron immediately — same reason as export_db above.
-        wp_remote_get( site_url( '/?doing_wp_cron' ), [
-            'blocking'  => false,
-            'timeout'   => 0.01,
-            'sslverify' => false,
-        ] );
+        // Run process_queue() after the 202 response is sent — same approach as export_db.
+        // Loopback WP-Cron kicks are unreliable on Azure App Service + Front Door.
+        register_shutdown_function( function () {
+            if ( function_exists( 'fastcgi_finish_request' ) ) {
+                fastcgi_finish_request();
+            }
+            ignore_user_abort( true );
+            set_time_limit( 300 );
+            KloudStack_Migration_BackgroundExport::process_queue();
+        } );
+
+        if ( ! wp_next_scheduled( KloudStack_Migration_BackgroundExport::CRON_HOOK ) ) {
+            wp_schedule_single_event( time(), KloudStack_Migration_BackgroundExport::CRON_HOOK );
+        }
 
         return new WP_REST_Response( [ 'job_id' => $job_id ], 202 );
     }

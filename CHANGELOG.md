@@ -2,7 +2,16 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
-## [1.2.3] - 2026-03-25
+## [1.2.4] - 2026-03-22
+
+### Fixed
+- Media upload job stuck at 0% on Azure App Service: applied the same
+  `register_shutdown_function` + `fastcgi_finish_request()` fix to the
+  `upload_media` endpoint that was applied to `export_db` in v1.2.3.
+  The unreliable loopback `wp_remote_get('/?doing_wp_cron')` is now
+  removed from both export stages.
+
+## [1.2.3] - 2026-03-22
 
 ### Fixed
 - DB export job stuck at 0% on Azure App Service: replaced unreliable loopback
