@@ -2,6 +2,12 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
+## [1.2.8] - 2026-03-23
+
+### Added
+- **`/diagnostics` endpoint**: New `GET` endpoint returning a comprehensive snapshot of the export queue depth, per-job status/progress, WP-Cron schedule, PHP runtime capabilities (memory, exec, ZipArchive, fastcgi), hosting platform detection, and temp disk space. Used by the migration agent to diagnose stalled jobs before deciding on recovery actions.
+- **`/process-queue` endpoint**: New `POST` endpoint that directly triggers the export queue processor. Intended as a recovery mechanism on Azure App Service where WP-Cron URL nudges via the Front Door CDN URL are unreliable. Uses `fastcgi_finish_request()` to respond immediately while processing continues in the background.
+
 ## [1.2.7] - 2026-07-14
 
 ### Added

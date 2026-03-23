@@ -92,6 +92,18 @@ class KloudStack_Migration_RestEndpoints {
             'callback'            => [ __CLASS__, 'export_site_content' ],
             'permission_callback' => [ __CLASS__, 'verify_token' ],
         ] );
+
+        register_rest_route( $ns, '/diagnostics', [
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [ __CLASS__, 'diagnostics' ],
+            'permission_callback' => [ __CLASS__, 'verify_token' ],
+        ] );
+
+        register_rest_route( $ns, '/process-queue', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [ __CLASS__, 'process_queue_trigger' ],
+            'permission_callback' => [ __CLASS__, 'verify_token' ],
+        ] );
     }
 
     // ------------------------------------------------------------------
@@ -569,6 +581,132 @@ class KloudStack_Migration_RestEndpoints {
             'per_page'   => $per_page,
             'has_more'   => ( $offset + $per_page ) < $total,
         ], 200 );
+    }
+
+    // ------------------------------------------------------------------
+    // Endpoint: GET /diagnostics
+    // ------------------------------------------------------------------
+
+    /**
+     * Return a comprehensive diagnostic snapshot of the export queue and PHP environment.
+     *
+     * Called by the migration agent when a job stalls at 0% to understand WHY
+     * processing has not started. The response gives the agent enough context to
+     * decide whether to call /process-queue, escalate to the user, or abort.
+     *
+     * @param WP_REST_Request $request
+     * @return WP_REST_Response
+     */
+    public static function diagnostics( WP_REST_Request $request ): WP_REST_Response {
+        $queue      = get_option( KloudStack_Migration_BackgroundExport::QUEUE_OPTION, [] );
+        $lock_key   = 'ks_mig_queue_lock';
+        $lock_value = get_transient( $lock_key );
+
+        // Collect per-job status from transients so the agent can cross-reference
+        // queue entries against their current transient state.
+        $queue_jobs = [];
+        foreach ( $queue as $item ) {
+            $job_id    = $item['job_id'] ?? '';
+            $transient = get_transient( self::JOB_TRANSIENT_PREFIX . $job_id );
+            $queue_jobs[] = [
+                'job_id'   => $job_id,
+                'type'     => $item['type'] ?? 'unknown',
+                'artifact' => $item['artifact'] ?? null,
+                'status'   => is_array( $transient ) ? ( $transient['status'] ?? 'unknown' ) : 'transient_missing',
+                'progress' => is_array( $transient ) ? ( $transient['progress'] ?? 0 ) : 0,
+                'error'    => is_array( $transient ) ? ( $transient['error'] ?? null ) : null,
+            ];
+        }
+
+        // Memory usage
+        $mem_used_mb  = round( memory_get_usage( true ) / 1024 / 1024, 1 );
+        $mem_peak_mb  = round( memory_get_peak_usage( true ) / 1024 / 1024, 1 );
+        $mem_limit_mb = self::_php_memory_limit_mb();
+
+        // WP-Cron next scheduled run for our hook
+        $cron_next = wp_next_scheduled( KloudStack_Migration_BackgroundExport::CRON_HOOK );
+
+        // PHP environment: which potentially-restricted functions are available
+        $disable_fns = array_filter( array_map( 'trim', explode( ',', ini_get( 'disable_functions' ) ) ) );
+
+        return new WP_REST_Response( [
+            // Queue state
+            'queue_depth'          => count( $queue ),
+            'queue_jobs'           => $queue_jobs,
+
+            // Processing lock (TTL = 10 min; active means process_queue() is running)
+            'lock_active'          => ( false !== $lock_value ),
+
+            // WP-Cron
+            'wpcron_enabled'       => ! ( defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ),
+            'cron_next_scheduled'  => $cron_next ? (int) $cron_next : null,
+            'cron_overdue_seconds' => $cron_next ? max( 0, time() - (int) $cron_next ) : null,
+
+            // PHP runtime capabilities
+            'fastcgi_available'      => function_exists( 'fastcgi_finish_request' ),
+            'exec_available'         => ( function_exists( 'exec' ) && ! in_array( 'exec', $disable_fns, true ) ),
+            'ziparchive_available'   => class_exists( 'ZipArchive' ),
+            'php_memory_used_mb'     => $mem_used_mb,
+            'php_memory_peak_mb'     => $mem_peak_mb,
+            'php_memory_limit_mb'    => $mem_limit_mb,
+            'php_memory_near_limit'  => $mem_limit_mb > 0 && ( $mem_used_mb / $mem_limit_mb ) > 0.8,
+            'php_max_execution_time' => (int) ini_get( 'max_execution_time' ),
+
+            // Hosting environment
+            'hosting_platform'       => self::_detect_hosting_platform(),
+
+            // Temp disk space available for dump/zip files
+            'tmp_free_mb'            => ( disk_free_space( sys_get_temp_dir() ) !== false )
+                ? round( disk_free_space( sys_get_temp_dir() ) / 1024 / 1024, 1 )
+                : null,
+        ], 200 );
+    }
+
+    // ------------------------------------------------------------------
+    // Endpoint: POST /process-queue
+    // ------------------------------------------------------------------
+
+    /**
+     * Directly trigger the export queue processor and return immediately.
+     *
+     * Called by the migration agent as a recovery mechanism when a job stalls —
+     * specifically on Azure App Service where WP-Cron URL nudges via the Front Door
+     * CDN URL are unreliable (requests may not reach the PHP-FPM worker).
+     *
+     * Uses the same fastcgi_finish_request() pattern as export-db / upload-media:
+     * the 202 is flushed to the caller immediately, then process_queue() runs in
+     * the same PHP-FPM worker in the background. The agent's polling loop is
+     * never blocked.
+     *
+     * @param WP_REST_Request $request
+     * @return WP_REST_Response
+     */
+    public static function process_queue_trigger( WP_REST_Request $request ): WP_REST_Response {
+        $queue      = get_option( KloudStack_Migration_BackgroundExport::QUEUE_OPTION, [] );
+        $queue_size = count( $queue );
+
+        if ( 0 === $queue_size ) {
+            return new WP_REST_Response( [
+                'triggered'     => false,
+                'reason'        => 'queue_empty',
+                'jobs_in_queue' => 0,
+            ], 200 );
+        }
+
+        // Flush the 202 immediately, then process in the same PHP-FPM worker.
+        register_shutdown_function( function () {
+            if ( function_exists( 'fastcgi_finish_request' ) ) {
+                fastcgi_finish_request();
+            }
+            ignore_user_abort( true );
+            set_time_limit( 600 );
+            KloudStack_Migration_BackgroundExport::process_queue();
+        } );
+
+        return new WP_REST_Response( [
+            'triggered'     => true,
+            'jobs_in_queue' => $queue_size,
+        ], 202 );
     }
 
     // ------------------------------------------------------------------
