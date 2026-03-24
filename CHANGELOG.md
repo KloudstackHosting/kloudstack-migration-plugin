@@ -2,6 +2,11 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
+## [1.3.0] - 2026-03-24
+
+### Added
+- **`/discover` table analysis**: Added `table_count` (total tables in DB) and `table_row_counts` (per-core-table row counts for options, posts, postmeta, users, usermeta, terms, comments) to the `/discover` endpoint response. Used by the import task to cross-validate that imported data matches the source site analysis.
+
 ## [1.2.9] - 2026-03-24
 
 ### Fixed

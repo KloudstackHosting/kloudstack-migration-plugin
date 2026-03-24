@@ -210,6 +210,32 @@ class KloudStack_Migration_RestEndpoints {
         }
         $db_server_version = $db_server_version_raw;
 
+        // Table count and per-table row counts for post-import validation
+        $table_count_result = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*) FROM information_schema.TABLES WHERE table_schema = %s",
+                DB_NAME
+            )
+        );
+        $table_count = (int) ( $table_count_result ?? 0 );
+
+        // Per-table row counts for core WP tables (used by import validation)
+        $core_tables = [ 'options', 'posts', 'postmeta', 'users', 'usermeta', 'terms', 'comments' ];
+        $table_row_counts = [];
+        foreach ( $core_tables as $short_name ) {
+            $full_name = $wpdb->prefix . $short_name;
+            $row_count = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE table_schema = %s AND table_name = %s",
+                    DB_NAME,
+                    $full_name
+                )
+            );
+            if ( $row_count !== null ) {
+                $table_row_counts[ $short_name ] = (int) $row_count;
+            }
+        }
+
         // Media library count
         $media_count = wp_count_attachments()->total ?? 0;
 
@@ -241,6 +267,8 @@ class KloudStack_Migration_RestEndpoints {
             'db_server_version'  => $db_server_version,
             'db_size_mb'         => $db_size_mb,
             'db_name'       => DB_NAME,
+            'table_count'        => $table_count,
+            'table_row_counts'   => $table_row_counts,
             'media_count'   => (int) $media_count,
             'uploads_size_mb' => $uploads_size,
             'is_multisite'  => $is_multisite,
