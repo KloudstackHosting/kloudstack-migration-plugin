@@ -208,11 +208,13 @@ class KloudStack_Migration_BackgroundExport {
             // DB_PASSWORD is passed via env var to avoid appearing on process list
             putenv( 'MYSQL_PWD=' . DB_PASSWORD );
 
-            // gzip -4 balances compression vs CPU cost.
-            // gzip -9 (max) spikes CPU heavily on Azure App Service Consumption plans.
-            $cmd = "mysqldump --host={$host} --user={$user} --single-transaction "
+            // Use bash with pipefail so the pipeline exit code reflects mysqldump
+            // failures — without this, exec() only returns gzip's exit code.
+            // gzip stderr goes to /dev/null to prevent error messages from being
+            // appended to the .gz output (which would corrupt the gzip format).
+            $cmd = "bash -c 'set -o pipefail; mysqldump --host={$host} --user={$user} --single-transaction "
                  . "--routines --triggers --add-drop-table {$database} "
-                 . "| gzip -{$gzip_level} > {$tmp_esc} 2>&1";
+                 . "| gzip -{$gzip_level} > {$tmp_esc} 2>/dev/null'";
 
             $output    = [];
             $exit_code = 0;
@@ -222,11 +224,21 @@ class KloudStack_Migration_BackgroundExport {
             putenv( 'MYSQL_PWD=' );
 
             if ( 0 !== $exit_code ) {
-                throw new Exception( 'mysqldump failed (exit=' . $exit_code . '): ' . implode( ' ', $output ) );
+                throw new Exception( 'mysqldump | gzip pipeline failed (exit=' . $exit_code . '): ' . implode( ' ', $output ) );
             }
 
             if ( ! file_exists( $tmp_file ) || 0 === filesize( $tmp_file ) ) {
                 throw new Exception( 'mysqldump produced empty output.' );
+            }
+
+            // Verify gzip integrity before uploading — catches truncated dumps from
+            // interrupted mysqldump or gzip processes (e.g. PHP timeout, OOM kill).
+            $gzip_check_output = [];
+            $gzip_check_exit   = 0;
+            exec( "gzip -t {$tmp_esc} 2>&1", $gzip_check_output, $gzip_check_exit );
+            if ( 0 !== $gzip_check_exit ) {
+                $gzip_error = implode( ' ', $gzip_check_output );
+                throw new Exception( "DB dump gzip integrity check failed before upload — file is truncated or corrupt: {$gzip_error}" );
             }
 
             self::_update_job( $job_id, [ 'progress' => 70 ] );

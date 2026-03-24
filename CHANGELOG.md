@@ -2,6 +2,13 @@
 
 All notable changes to the KloudStack Migration Plugin will be documented here.
 
+## [1.2.9] - 2026-03-24
+
+### Fixed
+- **DB export pipeline reliability**: Wrapped `mysqldump | gzip` in `bash -c 'set -o pipefail; ...'` so `exec()` returns mysqldump's exit code (not just gzip's) — previously a mid-stream mysqldump failure was silently swallowed.
+- **Gzip output corruption**: Changed `2>&1` to `2>/dev/null` on the gzip side of the pipe to prevent stderr messages from being written into the `.gz` file.
+- **Pre-upload integrity check**: Added `gzip -t` validation on the temp file before uploading to Azure Blob — catches truncated dumps from interrupted mysqldump, PHP timeout, or OOM scenarios.
+
 ## [1.2.8] - 2026-03-23
 
 ### Added
